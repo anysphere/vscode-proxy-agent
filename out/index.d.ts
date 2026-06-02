@@ -57,6 +57,13 @@ export interface ProxyAgentParams {
     isWebSocketPatchEnabled: () => boolean;
     addCertificatesV1: () => boolean;
     addCertificatesV2: () => boolean;
+    /**
+     * When this returns true, reuse a cached SecureContext per distinct trust
+     * set instead of building a new one on every createSecureContext call.
+     * Optional for backwards compatibility: when unset or false, behaviour is
+     * identical to building a fresh context each time.
+     */
+    isSecureContextCacheEnabled?: () => boolean;
     loadSystemCertificatesFromNode: () => boolean | undefined;
     loadAdditionalCertificates(): Promise<string[]>;
     lookupProxyAuthorization?: LookupProxyAuthorization;

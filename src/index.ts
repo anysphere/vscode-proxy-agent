@@ -71,6 +71,13 @@ export interface ProxyAgentParams {
 	isWebSocketPatchEnabled: () => boolean,
 	addCertificatesV1: () => boolean,
 	addCertificatesV2: () => boolean,
+	/**
+	 * When this returns true, reuse a cached SecureContext per distinct trust
+	 * set instead of building a new one on every createSecureContext call.
+	 * Optional for backwards compatibility: when unset or false, behaviour is
+	 * identical to building a fresh context each time.
+	 */
+	isSecureContextCacheEnabled?: () => boolean;
 	loadSystemCertificatesFromNode: () => boolean | undefined;
 	loadAdditionalCertificates(): Promise<string[]>;
 	lookupProxyAuthorization?: LookupProxyAuthorization;
@@ -490,7 +497,7 @@ function patchNetConnect(params: ProxyAgentParams, original: typeof net.connect)
 export function createTlsPatch(params: ProxyAgentParams, originals: typeof tls) {
 	return {
 		connect: patchTlsConnect(params, originals.connect),
-		createSecureContext: patchCreateSecureContext(originals.createSecureContext),
+		createSecureContext: patchCreateSecureContext(params, originals.createSecureContext),
 	};
 }
 
@@ -601,14 +608,98 @@ function patchTlsConnect(params: ProxyAgentParams, original: typeof tls.connect)
 	return connect;
 }
 
-function patchCreateSecureContext(original: typeof tls.createSecureContext): typeof tls.createSecureContext {
+// Cache of SecureContexts produced by the patched createSecureContext. OpenSSL
+// 3's provider-based decoder makes parsing a CA set expensive, and that cost is
+// otherwise paid on every TLS connection because a fresh context is built each
+// time. Reusing one context per distinct trust set is the mitigation OpenSSL
+// itself recommends ("load once, use multiple times",
+// https://github.com/openssl/openssl/discussions/22900).
+//
+// Keyed on the additional-CA array reference, then the caller `ca` reference (or
+// a sentinel when absent), then a signature of the remaining context-affecting
+// options. WeakMaps let a reused certificate array hit while a transient one is
+// collected, so this never pins memory.
+const secureContextCacheSentinel = {};
+let secureContextCache = new WeakMap<object, WeakMap<object, Map<string, ReturnType<typeof tls.createSecureContext>>>>();
+
+function clearSecureContextCache(): void {
+	secureContextCache = new WeakMap();
+}
+
+// Per-socket options (servername, session, ALPNProtocols, rejectUnauthorized) are
+// intentionally excluded: they do not affect the SecureContext, so they must not
+// split the cache key.
+function secureContextSignature(details: tls.SecureContextOptions): string {
+	const d = details as Record<string, unknown>;
+	return [
+		d.secureProtocol ?? '',
+		d.minVersion ?? '',
+		d.maxVersion ?? '',
+		d.ciphers ?? '',
+		d.sigalgs ?? '',
+		d.ecdhCurve ?? '',
+		d.secureOptions ?? '',
+		d.honorCipherOrder ? '1' : '0',
+		typeof d.sessionIdContext === 'string' ? d.sessionIdContext : '',
+		d.dhparam ? '1' : '0',
+		d.crl ? '1' : '0',
+	].join('|');
+}
+
+// Only cache contexts with no per-identity / per-connection key material: those
+// are cheap to build and unsafe to share. A string `ca` is also excluded because
+// WeakMap keys must be objects.
+function isSecureContextCacheable(details: tls.SecureContextOptions | undefined): details is tls.SecureContextOptions {
+	if (!details || typeof details !== 'object') {
+		return false;
+	}
+	const d = details as Record<string, unknown>;
+	if (d.key || d.cert || d.pfx || d.clientCertEngine || d.passphrase || d.ticketKeys || d.privateKeyIdentifier || d.privateKeyEngine) {
+		return false;
+	}
+	if (d.ca !== undefined && typeof d.ca !== 'object') {
+		return false;
+	}
+	return true;
+}
+
+function patchCreateSecureContext(params: ProxyAgentParams, original: typeof tls.createSecureContext): typeof tls.createSecureContext {
 	return function (details?: tls.SecureContextOptions): ReturnType<typeof tls.createSecureContext> {
-		const context = original.apply(null, arguments as any);
 		const certs = (details as SecureContextOptionsPatch)?._vscodeAdditionalCaCerts;
+		const eligible = params.isSecureContextCacheEnabled?.() === true && isSecureContextCacheable(details);
+
+		let additionalKey: object | undefined;
+		let caKey: object | undefined;
+		let signature: string | undefined;
+		if (eligible) {
+			additionalKey = (certs as unknown as object) ?? secureContextCacheSentinel;
+			caKey = (details!.ca as object | undefined) ?? secureContextCacheSentinel;
+			signature = secureContextSignature(details!);
+			const cached = secureContextCache.get(additionalKey)?.get(caKey)?.get(signature);
+			if (cached) {
+				return cached;
+			}
+		}
+
+		const context = original.apply(null, arguments as any);
 		if (certs) {
 			for (const cert of certs) {
 				context.context.addCACert(cert);
 			}
+		}
+
+		if (eligible) {
+			let byCa = secureContextCache.get(additionalKey!);
+			if (!byCa) {
+				byCa = new WeakMap();
+				secureContextCache.set(additionalKey!, byCa);
+			}
+			let bySignature = byCa.get(caKey!);
+			if (!bySignature) {
+				bySignature = new Map();
+				byCa.set(caKey!, bySignature);
+			}
+			bySignature.set(signature!, context);
 		}
 		return context;
 	};
@@ -1214,6 +1305,7 @@ export async function loadSystemCertificates(params: CertificateParams) {
 export function resetCaches() {
 	_certs.clear();
 	_systemCertificatesPromise = undefined;
+	clearSecureContextCache();
 }
 
 async function readSystemCertificates(): Promise<string[]> {

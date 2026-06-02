@@ -425,7 +425,7 @@ function patchNetConnect(params, original) {
 function createTlsPatch(params, originals) {
     return {
         connect: patchTlsConnect(params, originals.connect),
-        createSecureContext: patchCreateSecureContext(originals.createSecureContext),
+        createSecureContext: patchCreateSecureContext(params, originals.createSecureContext),
     };
 }
 exports.createTlsPatch = createTlsPatch;
@@ -534,14 +534,93 @@ function patchTlsConnect(params, original) {
     }
     return connect;
 }
-function patchCreateSecureContext(original) {
+// Cache of SecureContexts produced by the patched createSecureContext. OpenSSL
+// 3's provider-based decoder makes parsing a CA set expensive, and that cost is
+// otherwise paid on every TLS connection because a fresh context is built each
+// time. Reusing one context per distinct trust set is the mitigation OpenSSL
+// itself recommends ("load once, use multiple times",
+// https://github.com/openssl/openssl/discussions/22900).
+//
+// Keyed on the additional-CA array reference, then the caller `ca` reference (or
+// a sentinel when absent), then a signature of the remaining context-affecting
+// options. WeakMaps let a reused certificate array hit while a transient one is
+// collected, so this never pins memory.
+const secureContextCacheSentinel = {};
+let secureContextCache = new WeakMap();
+function clearSecureContextCache() {
+    secureContextCache = new WeakMap();
+}
+// Per-socket options (servername, session, ALPNProtocols, rejectUnauthorized) are
+// intentionally excluded: they do not affect the SecureContext, so they must not
+// split the cache key.
+function secureContextSignature(details) {
+    var _a, _b, _c, _d, _e, _f, _g;
+    const d = details;
+    return [
+        (_a = d.secureProtocol) !== null && _a !== void 0 ? _a : '',
+        (_b = d.minVersion) !== null && _b !== void 0 ? _b : '',
+        (_c = d.maxVersion) !== null && _c !== void 0 ? _c : '',
+        (_d = d.ciphers) !== null && _d !== void 0 ? _d : '',
+        (_e = d.sigalgs) !== null && _e !== void 0 ? _e : '',
+        (_f = d.ecdhCurve) !== null && _f !== void 0 ? _f : '',
+        (_g = d.secureOptions) !== null && _g !== void 0 ? _g : '',
+        d.honorCipherOrder ? '1' : '0',
+        typeof d.sessionIdContext === 'string' ? d.sessionIdContext : '',
+        d.dhparam ? '1' : '0',
+        d.crl ? '1' : '0',
+    ].join('|');
+}
+// Only cache contexts with no per-identity / per-connection key material: those
+// are cheap to build and unsafe to share. A string `ca` is also excluded because
+// WeakMap keys must be objects.
+function isSecureContextCacheable(details) {
+    if (!details || typeof details !== 'object') {
+        return false;
+    }
+    const d = details;
+    if (d.key || d.cert || d.pfx || d.clientCertEngine || d.passphrase || d.ticketKeys || d.privateKeyIdentifier || d.privateKeyEngine) {
+        return false;
+    }
+    if (d.ca !== undefined && typeof d.ca !== 'object') {
+        return false;
+    }
+    return true;
+}
+function patchCreateSecureContext(params, original) {
     return function (details) {
-        const context = original.apply(null, arguments);
+        var _a, _b, _c, _d, _e;
         const certs = details === null || details === void 0 ? void 0 : details._vscodeAdditionalCaCerts;
+        const eligible = ((_a = params.isSecureContextCacheEnabled) === null || _a === void 0 ? void 0 : _a.call(params)) === true && isSecureContextCacheable(details);
+        let additionalKey;
+        let caKey;
+        let signature;
+        if (eligible) {
+            additionalKey = (_b = certs) !== null && _b !== void 0 ? _b : secureContextCacheSentinel;
+            caKey = (_c = details.ca) !== null && _c !== void 0 ? _c : secureContextCacheSentinel;
+            signature = secureContextSignature(details);
+            const cached = (_e = (_d = secureContextCache.get(additionalKey)) === null || _d === void 0 ? void 0 : _d.get(caKey)) === null || _e === void 0 ? void 0 : _e.get(signature);
+            if (cached) {
+                return cached;
+            }
+        }
+        const context = original.apply(null, arguments);
         if (certs) {
             for (const cert of certs) {
                 context.context.addCACert(cert);
             }
+        }
+        if (eligible) {
+            let byCa = secureContextCache.get(additionalKey);
+            if (!byCa) {
+                byCa = new WeakMap();
+                secureContextCache.set(additionalKey, byCa);
+            }
+            let bySignature = byCa.get(caKey);
+            if (!bySignature) {
+                bySignature = new Map();
+                byCa.set(caKey, bySignature);
+            }
+            bySignature.set(signature, context);
         }
         return context;
     };
@@ -1127,6 +1206,7 @@ exports.loadSystemCertificates = loadSystemCertificates;
 function resetCaches() {
     _certs.clear();
     _systemCertificatesPromise = undefined;
+    clearSecureContextCache();
 }
 exports.resetCaches = resetCaches;
 function readSystemCertificates() {
