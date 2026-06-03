@@ -1,8 +1,4 @@
 "use strict";
-/*---------------------------------------------------------------------------------------------
- *  Copyright (c) Microsoft Corporation. All rights reserved.
- *  Licensed under the MIT License. See License.txt in the project root for license information.
- *--------------------------------------------------------------------------------------------*/
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.clearSecureContextCache = exports.cacheSecureContext = exports.getCachedSecureContext = void 0;
 // Cache of SecureContexts built by the patched createSecureContext for a given trust set.
