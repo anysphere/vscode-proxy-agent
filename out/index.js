@@ -46,6 +46,7 @@ const cp = __importStar(require("child_process"));
 const crypto = __importStar(require("crypto"));
 const undici = __importStar(require("undici"));
 const agent_1 = require("./agent");
+const secureContextCache_1 = require("./secureContextCache");
 var LogLevel;
 (function (LogLevel) {
     LogLevel[LogLevel["Trace"] = 0] = "Trace";
@@ -425,7 +426,7 @@ function patchNetConnect(params, original) {
 function createTlsPatch(params, originals) {
     return {
         connect: patchTlsConnect(params, originals.connect),
-        createSecureContext: patchCreateSecureContext(originals.createSecureContext),
+        createSecureContext: patchCreateSecureContext(params, originals.createSecureContext),
     };
 }
 exports.createTlsPatch = createTlsPatch;
@@ -534,14 +535,27 @@ function patchTlsConnect(params, original) {
     }
     return connect;
 }
-function patchCreateSecureContext(original) {
+function patchCreateSecureContext(params, original) {
     return function (details) {
-        const context = original.apply(null, arguments);
+        var _a;
         const certs = details === null || details === void 0 ? void 0 : details._vscodeAdditionalCaCerts;
+        const cacheEnabled = ((_a = params.isSecureContextCacheEnabled) === null || _a === void 0 ? void 0 : _a.call(params)) === true;
+        // secureContextCache decides what is cacheable from the trust material on `details`
+        // (the caller `ca` and/or the injected additional-CA set); anything else builds fresh.
+        if (cacheEnabled && details) {
+            const cached = (0, secureContextCache_1.getCachedSecureContext)(details);
+            if (cached) {
+                return cached;
+            }
+        }
+        const context = original.apply(null, arguments);
         if (certs) {
             for (const cert of certs) {
                 context.context.addCACert(cert);
             }
+        }
+        if (cacheEnabled && details) {
+            (0, secureContextCache_1.cacheSecureContext)(details, context);
         }
         return context;
     };
@@ -1127,6 +1141,7 @@ exports.loadSystemCertificates = loadSystemCertificates;
 function resetCaches() {
     _certs.clear();
     _systemCertificatesPromise = undefined;
+    (0, secureContextCache_1.clearSecureContextCache)();
 }
 exports.resetCaches = resetCaches;
 function readSystemCertificates() {

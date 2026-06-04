@@ -16,6 +16,7 @@ import * as undici from 'undici';
 import * as stream from 'stream';
 
 import { createPacProxyAgent, getProxyURLFromResolverResult, PacProxyAgent } from './agent';
+import { cacheSecureContext, clearSecureContextCache, getCachedSecureContext } from './secureContextCache';
 import type { IncomingHttpHeaders } from 'undici/types/header';
 
 export enum LogLevel {
@@ -71,6 +72,13 @@ export interface ProxyAgentParams {
 	isWebSocketPatchEnabled: () => boolean,
 	addCertificatesV1: () => boolean,
 	addCertificatesV2: () => boolean,
+	/**
+	 * When this returns true, SecureContexts built for the injected additional-CA
+	 * trust set are cached and reused instead of being rebuilt on every
+	 * createSecureContext call. Optional for backwards compatibility: when unset
+	 * or false, behaviour is identical to building a fresh context each time.
+	 */
+	isSecureContextCacheEnabled?: () => boolean;
 	loadSystemCertificatesFromNode: () => boolean | undefined;
 	loadAdditionalCertificates(): Promise<string[]>;
 	lookupProxyAuthorization?: LookupProxyAuthorization;
@@ -490,7 +498,7 @@ function patchNetConnect(params: ProxyAgentParams, original: typeof net.connect)
 export function createTlsPatch(params: ProxyAgentParams, originals: typeof tls) {
 	return {
 		connect: patchTlsConnect(params, originals.connect),
-		createSecureContext: patchCreateSecureContext(originals.createSecureContext),
+		createSecureContext: patchCreateSecureContext(params, originals.createSecureContext),
 	};
 }
 
@@ -601,14 +609,29 @@ function patchTlsConnect(params: ProxyAgentParams, original: typeof tls.connect)
 	return connect;
 }
 
-function patchCreateSecureContext(original: typeof tls.createSecureContext): typeof tls.createSecureContext {
+function patchCreateSecureContext(params: ProxyAgentParams, original: typeof tls.createSecureContext): typeof tls.createSecureContext {
 	return function (details?: tls.SecureContextOptions): ReturnType<typeof tls.createSecureContext> {
+		const certs = (details as SecureContextOptionsPatch | undefined)?._vscodeAdditionalCaCerts;
+		const cacheEnabled = params.isSecureContextCacheEnabled?.() === true;
+
+		// secureContextCache decides what is cacheable from the trust material on `details`
+		// (the caller `ca` and/or the injected additional-CA set); anything else builds fresh.
+		if (cacheEnabled && details) {
+			const cached = getCachedSecureContext(details);
+			if (cached) {
+				return cached;
+			}
+		}
+
 		const context = original.apply(null, arguments as any);
-		const certs = (details as SecureContextOptionsPatch)?._vscodeAdditionalCaCerts;
 		if (certs) {
 			for (const cert of certs) {
 				context.context.addCACert(cert);
 			}
+		}
+
+		if (cacheEnabled && details) {
+			cacheSecureContext(details, context);
 		}
 		return context;
 	};
@@ -1214,6 +1237,7 @@ export async function loadSystemCertificates(params: CertificateParams) {
 export function resetCaches() {
 	_certs.clear();
 	_systemCertificatesPromise = undefined;
+	clearSecureContextCache();
 }
 
 async function readSystemCertificates(): Promise<string[]> {
