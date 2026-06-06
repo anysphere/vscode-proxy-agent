@@ -1,6 +1,6 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.clearSecureContextCache = exports.cacheSecureContext = exports.getCachedSecureContext = void 0;
+exports.clearSecureContextCache = exports.cacheSecureContext = exports.getCachedSecureContext = exports.secureContextCacheKey = void 0;
 // Cache of SecureContexts built by the patched createSecureContext for a given trust set.
 // OpenSSL 3's provider-based decoder makes parsing a CA set expensive, and that cost is otherwise
 // paid on every TLS connection because a fresh context is built each time. Reusing one context per
@@ -34,8 +34,11 @@ const disqualifyingContextOptions = ['cert', 'key', 'pfx', 'passphrase', 'client
  * Computes the cache key for the given options, or undefined when they are not cacheable. Per-socket
  * options (servername, session, ALPNProtocols, rejectUnauthorized, ...) do not affect the
  * SecureContext and are deliberately ignored so they cannot split the cache.
+ *
+ * Callers compute this once and pass it to the lookup and store below, so the option scan is not
+ * repeated; a defined result also means the request is cacheable.
  */
-function cacheKey(details) {
+function secureContextCacheKey(details) {
     var _a, _b;
     const options = details;
     for (const option of disqualifyingContextOptions) {
@@ -70,28 +73,20 @@ function cacheKey(details) {
         signature: parts.join('|'),
     };
 }
+exports.secureContextCacheKey = secureContextCacheKey;
 /**
- * Returns the cached SecureContext for the given options, or undefined when there is no cached entry
- * or the options are not cacheable.
+ * Returns the cached SecureContext for the given key, or undefined when nothing is stored for it yet.
  */
-function getCachedSecureContext(details) {
+function getCachedSecureContext(key) {
     var _a, _b;
-    const key = cacheKey(details);
-    if (key === undefined) {
-        return undefined;
-    }
     return (_b = (_a = cache.get(key.caKey)) === null || _a === void 0 ? void 0 : _a.get(key.additionalKey)) === null || _b === void 0 ? void 0 : _b.get(key.signature);
 }
 exports.getCachedSecureContext = getCachedSecureContext;
 /**
- * Stores a SecureContext built for the given options. No-op when the options are not cacheable. The
- * context is shared with every later cache hit, so it must not be mutated after being stored.
+ * Stores a SecureContext under the given key. The context is shared with every later cache hit, so it
+ * must not be mutated after being stored.
  */
-function cacheSecureContext(details, context) {
-    const key = cacheKey(details);
-    if (key === undefined) {
-        return;
-    }
+function cacheSecureContext(key, context) {
     let byAdditional = cache.get(key.caKey);
     if (!byAdditional) {
         byAdditional = new WeakMap();

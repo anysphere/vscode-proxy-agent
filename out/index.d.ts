@@ -107,6 +107,13 @@ export declare function createTlsPatch(params: ProxyAgentParams, originals: type
     connect: typeof tls.connect;
     createSecureContext: typeof tls.createSecureContext;
 };
+/**
+ * Snapshot of the cumulative cacheable hit/miss counts; sample periodically and report the delta.
+ */
+export declare function secureContextCacheStats(): {
+    hits: number;
+    misses: number;
+};
 export declare function createFetchPatch(params: ProxyAgentParams, originalFetch: typeof globalThis.fetch, resolveProxyURL: (url: string) => Promise<string | undefined>, options?: CreateFetchPatchOptions): (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
 export declare function createWebSocketPatch(params: ProxyAgentParams, originalWebSocket: typeof globalThis.WebSocket, resolveProxyURL: (url: string) => Promise<string | undefined>): {
     new (url: string | URL, protocols?: string | string[] | undefined): WebSocket;

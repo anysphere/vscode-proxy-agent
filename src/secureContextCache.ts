@@ -34,7 +34,7 @@ const keyedContextOptions = ['secureProtocol', 'minVersion', 'maxVersion', 'ciph
  */
 const disqualifyingContextOptions = ['cert', 'key', 'pfx', 'passphrase', 'clientCertEngine', 'privateKeyEngine', 'privateKeyIdentifier', 'ticketKeys', 'crl', 'dhparam', 'sessionIdContext', 'sessionTimeout', 'allowPartialTrustChain'] as const;
 
-interface CacheKey {
+export interface SecureContextCacheKey {
 	caKey: object;
 	additionalKey: object;
 	signature: string;
@@ -44,8 +44,11 @@ interface CacheKey {
  * Computes the cache key for the given options, or undefined when they are not cacheable. Per-socket
  * options (servername, session, ALPNProtocols, rejectUnauthorized, ...) do not affect the
  * SecureContext and are deliberately ignored so they cannot split the cache.
+ *
+ * Callers compute this once and pass it to the lookup and store below, so the option scan is not
+ * repeated; a defined result also means the request is cacheable.
  */
-function cacheKey(details: tls.SecureContextOptions): CacheKey | undefined {
+export function secureContextCacheKey(details: tls.SecureContextOptions): SecureContextCacheKey | undefined {
 	const options = details as Record<string, unknown>;
 
 	for (const option of disqualifyingContextOptions) {
@@ -86,27 +89,17 @@ function cacheKey(details: tls.SecureContextOptions): CacheKey | undefined {
 }
 
 /**
- * Returns the cached SecureContext for the given options, or undefined when there is no cached entry
- * or the options are not cacheable.
+ * Returns the cached SecureContext for the given key, or undefined when nothing is stored for it yet.
  */
-export function getCachedSecureContext(details: tls.SecureContextOptions): SecureContext | undefined {
-	const key = cacheKey(details);
-	if (key === undefined) {
-		return undefined;
-	}
+export function getCachedSecureContext(key: SecureContextCacheKey): SecureContext | undefined {
 	return cache.get(key.caKey)?.get(key.additionalKey)?.get(key.signature);
 }
 
 /**
- * Stores a SecureContext built for the given options. No-op when the options are not cacheable. The
- * context is shared with every later cache hit, so it must not be mutated after being stored.
+ * Stores a SecureContext under the given key. The context is shared with every later cache hit, so it
+ * must not be mutated after being stored.
  */
-export function cacheSecureContext(details: tls.SecureContextOptions, context: SecureContext): void {
-	const key = cacheKey(details);
-	if (key === undefined) {
-		return;
-	}
-
+export function cacheSecureContext(key: SecureContextCacheKey, context: SecureContext): void {
 	let byAdditional = cache.get(key.caKey);
 	if (!byAdditional) {
 		byAdditional = new WeakMap();
