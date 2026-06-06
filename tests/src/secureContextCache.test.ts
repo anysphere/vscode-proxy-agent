@@ -97,6 +97,18 @@ describe('SecureContext cache', function () {
 		assert.strictEqual(createSecureContext({ ...connectionOptions(certs), minVersion: 'TLSv1.2' }), tls12);
 	});
 
+	it('reports cacheable misses and hits, and skips uncacheable requests', function () {
+		const results: boolean[] = [];
+		const { createSecureContext } = createTlsPatch(testParams({ onSecureContextCacheResult: hit => results.push(hit) }), tls);
+		const certs = [caCert];
+
+		createSecureContext(connectionOptions(certs)); // Cacheable miss: builds and stores a fresh context.
+		createSecureContext(connectionOptions(certs)); // Cacheable hit: same trust set reuses the context.
+		createSecureContext({}); // Not cacheable: no trust material, so the callback must not fire.
+
+		assert.deepStrictEqual(results, [false, true]);
+	});
+
 	it('drops cached contexts on resetCaches', function () {
 		const { createSecureContext } = createTlsPatch(testParams(), tls);
 		const certs = [caCert];

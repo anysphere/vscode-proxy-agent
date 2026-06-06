@@ -16,7 +16,7 @@ import * as undici from 'undici';
 import * as stream from 'stream';
 
 import { createPacProxyAgent, getProxyURLFromResolverResult, PacProxyAgent } from './agent';
-import { cacheSecureContext, clearSecureContextCache, getCachedSecureContext } from './secureContextCache';
+import { cacheSecureContext, clearSecureContextCache, getCachedSecureContext, isSecureContextCacheable } from './secureContextCache';
 import type { IncomingHttpHeaders } from 'undici/types/header';
 
 export enum LogLevel {
@@ -79,6 +79,15 @@ export interface ProxyAgentParams {
 	 * or false, behaviour is identical to building a fresh context each time.
 	 */
 	isSecureContextCacheEnabled?: () => boolean;
+	/**
+	 * Optional observability hook invoked for cacheable SecureContext requests while the
+	 * SecureContext cache is enabled, so a consumer can measure its hit rate. Called with
+	 * `true` on a cache hit and `false` on a cacheable miss (a fresh context was built and
+	 * stored). It is not called for requests the cache does not apply to (no trust material,
+	 * per-identity key material present, a non-referenceable string `ca`, etc.). When unset,
+	 * behaviour is identical to building a fresh context each time.
+	 */
+	onSecureContextCacheResult?: (hit: boolean) => void;
 	loadSystemCertificatesFromNode: () => boolean | undefined;
 	loadAdditionalCertificates(): Promise<string[]>;
 	lookupProxyAuthorization?: LookupProxyAuthorization;
@@ -613,12 +622,14 @@ function patchCreateSecureContext(params: ProxyAgentParams, original: typeof tls
 	return function (details?: tls.SecureContextOptions): ReturnType<typeof tls.createSecureContext> {
 		const certs = (details as SecureContextOptionsPatch | undefined)?._vscodeAdditionalCaCerts;
 		const cacheEnabled = params.isSecureContextCacheEnabled?.() === true;
+		const onCacheResult = params.onSecureContextCacheResult;
 
 		// secureContextCache decides what is cacheable from the trust material on `details`
 		// (the caller `ca` and/or the injected additional-CA set); anything else builds fresh.
 		if (cacheEnabled && details) {
 			const cached = getCachedSecureContext(details);
 			if (cached) {
+				onCacheResult?.(true);
 				return cached;
 			}
 		}
@@ -632,6 +643,11 @@ function patchCreateSecureContext(params: ProxyAgentParams, original: typeof tls
 
 		if (cacheEnabled && details) {
 			cacheSecureContext(details, context);
+			// Report the miss only for requests the cache applies to, so the measured rate
+			// reflects the cache's effectiveness on the relevant population.
+			if (onCacheResult && isSecureContextCacheable(details)) {
+				onCacheResult(false);
+			}
 		}
 		return context;
 	};

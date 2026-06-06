@@ -540,11 +540,13 @@ function patchCreateSecureContext(params, original) {
         var _a;
         const certs = details === null || details === void 0 ? void 0 : details._vscodeAdditionalCaCerts;
         const cacheEnabled = ((_a = params.isSecureContextCacheEnabled) === null || _a === void 0 ? void 0 : _a.call(params)) === true;
+        const onCacheResult = params.onSecureContextCacheResult;
         // secureContextCache decides what is cacheable from the trust material on `details`
         // (the caller `ca` and/or the injected additional-CA set); anything else builds fresh.
         if (cacheEnabled && details) {
             const cached = (0, secureContextCache_1.getCachedSecureContext)(details);
             if (cached) {
+                onCacheResult === null || onCacheResult === void 0 ? void 0 : onCacheResult(true);
                 return cached;
             }
         }
@@ -556,6 +558,11 @@ function patchCreateSecureContext(params, original) {
         }
         if (cacheEnabled && details) {
             (0, secureContextCache_1.cacheSecureContext)(details, context);
+            // Report the miss only for requests the cache applies to, so the measured rate
+            // reflects the cache's effectiveness on the relevant population.
+            if (onCacheResult && (0, secureContextCache_1.isSecureContextCacheable)(details)) {
+                onCacheResult(false);
+            }
         }
         return context;
     };

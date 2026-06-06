@@ -1,6 +1,6 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.clearSecureContextCache = exports.cacheSecureContext = exports.getCachedSecureContext = void 0;
+exports.clearSecureContextCache = exports.cacheSecureContext = exports.getCachedSecureContext = exports.isSecureContextCacheable = void 0;
 // Cache of SecureContexts built by the patched createSecureContext for a given trust set.
 // OpenSSL 3's provider-based decoder makes parsing a CA set expensive, and that cost is otherwise
 // paid on every TLS connection because a fresh context is built each time. Reusing one context per
@@ -70,6 +70,15 @@ function cacheKey(details) {
         signature: parts.join('|'),
     };
 }
+/**
+ * Reports whether a SecureContext built for the given options would be cached. Mirrors the decision
+ * getCachedSecureContext and cacheSecureContext make internally, so callers can measure the cache
+ * hit rate over only the requests the cache actually applies to.
+ */
+function isSecureContextCacheable(details) {
+    return cacheKey(details) !== undefined;
+}
+exports.isSecureContextCacheable = isSecureContextCacheable;
 /**
  * Returns the cached SecureContext for the given options, or undefined when there is no cached entry
  * or the options are not cacheable.

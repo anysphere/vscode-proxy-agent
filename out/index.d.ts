@@ -64,6 +64,15 @@ export interface ProxyAgentParams {
      * or false, behaviour is identical to building a fresh context each time.
      */
     isSecureContextCacheEnabled?: () => boolean;
+    /**
+     * Optional observability hook invoked for cacheable SecureContext requests while the
+     * SecureContext cache is enabled, so a consumer can measure its hit rate. Called with
+     * `true` on a cache hit and `false` on a cacheable miss (a fresh context was built and
+     * stored). It is not called for requests the cache does not apply to (no trust material,
+     * per-identity key material present, a non-referenceable string `ca`, etc.). When unset,
+     * behaviour is identical to building a fresh context each time.
+     */
+    onSecureContextCacheResult?: (hit: boolean) => void;
     loadSystemCertificatesFromNode: () => boolean | undefined;
     loadAdditionalCertificates(): Promise<string[]>;
     lookupProxyAuthorization?: LookupProxyAuthorization;

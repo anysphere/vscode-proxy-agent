@@ -2,6 +2,12 @@
 import * as tls from 'tls';
 type SecureContext = ReturnType<typeof tls.createSecureContext>;
 /**
+ * Reports whether a SecureContext built for the given options would be cached. Mirrors the decision
+ * getCachedSecureContext and cacheSecureContext make internally, so callers can measure the cache
+ * hit rate over only the requests the cache actually applies to.
+ */
+export declare function isSecureContextCacheable(details: tls.SecureContextOptions): boolean;
+/**
  * Returns the cached SecureContext for the given options, or undefined when there is no cached entry
  * or the options are not cacheable.
  */

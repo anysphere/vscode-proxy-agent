@@ -86,6 +86,15 @@ function cacheKey(details: tls.SecureContextOptions): CacheKey | undefined {
 }
 
 /**
+ * Reports whether a SecureContext built for the given options would be cached. Mirrors the decision
+ * getCachedSecureContext and cacheSecureContext make internally, so callers can measure the cache
+ * hit rate over only the requests the cache actually applies to.
+ */
+export function isSecureContextCacheable(details: tls.SecureContextOptions): boolean {
+	return cacheKey(details) !== undefined;
+}
+
+/**
  * Returns the cached SecureContext for the given options, or undefined when there is no cached entry
  * or the options are not cacheable.
  */
