@@ -36,7 +36,7 @@ var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, ge
     });
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.toLogString = exports.resetCaches = exports.loadSystemCertificates = exports.getOrLoadAdditionalCertificates = exports.patchUndici = exports.setProxyAuthorizationHeader = exports.createWebSocketPatch = exports.createFetchPatch = exports.createTlsPatch = exports.createNetPatch = exports.createHttpPatch = exports.createProxyResolver = exports.LogLevel = void 0;
+exports.toLogString = exports.resetCaches = exports.loadSystemCertificates = exports.getOrLoadAdditionalCertificates = exports.patchUndici = exports.setProxyAuthorizationHeader = exports.createWebSocketPatch = exports.createFetchPatch = exports.secureContextCacheStats = exports.createTlsPatch = exports.createNetPatch = exports.createHttpPatch = exports.createProxyResolver = exports.LogLevel = void 0;
 const net = __importStar(require("net"));
 const tls = __importStar(require("tls"));
 const nodeurl = __importStar(require("url"));
@@ -535,18 +535,30 @@ function patchTlsConnect(params, original) {
     }
     return connect;
 }
+// Process-lifetime, monotonic counters over the cacheable SecureContext population. A consumer samples
+// secureContextCacheStats() on its own cadence and emits one aggregate metric, rather than reporting
+// per connection — which from the extension host would be one IPC message per TLS handshake.
+let secureContextCacheHits = 0;
+let secureContextCacheMisses = 0;
+/**
+ * Snapshot of the cumulative cacheable hit/miss counts; sample periodically and report the delta.
+ */
+function secureContextCacheStats() {
+    return { hits: secureContextCacheHits, misses: secureContextCacheMisses };
+}
+exports.secureContextCacheStats = secureContextCacheStats;
 function patchCreateSecureContext(params, original) {
     return function (details) {
         var _a;
         const certs = details === null || details === void 0 ? void 0 : details._vscodeAdditionalCaCerts;
         const cacheEnabled = ((_a = params.isSecureContextCacheEnabled) === null || _a === void 0 ? void 0 : _a.call(params)) === true;
-        const onCacheResult = params.onSecureContextCacheResult;
-        // secureContextCache decides what is cacheable from the trust material on `details`
-        // (the caller `ca` and/or the injected additional-CA set); anything else builds fresh.
-        if (cacheEnabled && details) {
-            const cached = (0, secureContextCache_1.getCachedSecureContext)(details);
+        // Compute the cache key once and reuse it for the lookup and store below; a defined key also
+        // means the request is cacheable (so it gates the counters). Uncacheable requests build fresh.
+        const key = cacheEnabled && details ? (0, secureContextCache_1.secureContextCacheKey)(details) : undefined;
+        if (key) {
+            const cached = (0, secureContextCache_1.getCachedSecureContext)(key);
             if (cached) {
-                onCacheResult === null || onCacheResult === void 0 ? void 0 : onCacheResult(true);
+                secureContextCacheHits++;
                 return cached;
             }
         }
@@ -556,13 +568,9 @@ function patchCreateSecureContext(params, original) {
                 context.context.addCACert(cert);
             }
         }
-        if (cacheEnabled && details) {
-            (0, secureContextCache_1.cacheSecureContext)(details, context);
-            // Report the miss only for requests the cache applies to, so the measured rate
-            // reflects the cache's effectiveness on the relevant population.
-            if (onCacheResult && (0, secureContextCache_1.isSecureContextCacheable)(details)) {
-                onCacheResult(false);
-            }
+        if (key) {
+            (0, secureContextCache_1.cacheSecureContext)(key, context);
+            secureContextCacheMisses++;
         }
         return context;
     };

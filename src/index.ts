@@ -16,7 +16,7 @@ import * as undici from 'undici';
 import * as stream from 'stream';
 
 import { createPacProxyAgent, getProxyURLFromResolverResult, PacProxyAgent } from './agent';
-import { cacheSecureContext, clearSecureContextCache, getCachedSecureContext, isSecureContextCacheable } from './secureContextCache';
+import { cacheSecureContext, clearSecureContextCache, getCachedSecureContext, secureContextCacheKey } from './secureContextCache';
 import type { IncomingHttpHeaders } from 'undici/types/header';
 
 export enum LogLevel {
@@ -79,15 +79,6 @@ export interface ProxyAgentParams {
 	 * or false, behaviour is identical to building a fresh context each time.
 	 */
 	isSecureContextCacheEnabled?: () => boolean;
-	/**
-	 * Optional observability hook invoked for cacheable SecureContext requests while the
-	 * SecureContext cache is enabled, so a consumer can measure its hit rate. Called with
-	 * `true` on a cache hit and `false` on a cacheable miss (a fresh context was built and
-	 * stored). It is not called for requests the cache does not apply to (no trust material,
-	 * per-identity key material present, a non-referenceable string `ca`, etc.). When unset,
-	 * behaviour is identical to building a fresh context each time.
-	 */
-	onSecureContextCacheResult?: (hit: boolean) => void;
 	loadSystemCertificatesFromNode: () => boolean | undefined;
 	loadAdditionalCertificates(): Promise<string[]>;
 	lookupProxyAuthorization?: LookupProxyAuthorization;
@@ -618,18 +609,31 @@ function patchTlsConnect(params: ProxyAgentParams, original: typeof tls.connect)
 	return connect;
 }
 
+// Process-lifetime, monotonic counters over the cacheable SecureContext population. A consumer samples
+// secureContextCacheStats() on its own cadence and emits one aggregate metric, rather than reporting
+// per connection — which from the extension host would be one IPC message per TLS handshake.
+let secureContextCacheHits = 0;
+let secureContextCacheMisses = 0;
+
+/**
+ * Snapshot of the cumulative cacheable hit/miss counts; sample periodically and report the delta.
+ */
+export function secureContextCacheStats(): { hits: number; misses: number } {
+	return { hits: secureContextCacheHits, misses: secureContextCacheMisses };
+}
+
 function patchCreateSecureContext(params: ProxyAgentParams, original: typeof tls.createSecureContext): typeof tls.createSecureContext {
 	return function (details?: tls.SecureContextOptions): ReturnType<typeof tls.createSecureContext> {
 		const certs = (details as SecureContextOptionsPatch | undefined)?._vscodeAdditionalCaCerts;
 		const cacheEnabled = params.isSecureContextCacheEnabled?.() === true;
-		const onCacheResult = params.onSecureContextCacheResult;
 
-		// secureContextCache decides what is cacheable from the trust material on `details`
-		// (the caller `ca` and/or the injected additional-CA set); anything else builds fresh.
-		if (cacheEnabled && details) {
-			const cached = getCachedSecureContext(details);
+		// Compute the cache key once and reuse it for the lookup and store below; a defined key also
+		// means the request is cacheable (so it gates the counters). Uncacheable requests build fresh.
+		const key = cacheEnabled && details ? secureContextCacheKey(details) : undefined;
+		if (key) {
+			const cached = getCachedSecureContext(key);
 			if (cached) {
-				onCacheResult?.(true);
+				secureContextCacheHits++;
 				return cached;
 			}
 		}
@@ -641,13 +645,9 @@ function patchCreateSecureContext(params: ProxyAgentParams, original: typeof tls
 			}
 		}
 
-		if (cacheEnabled && details) {
-			cacheSecureContext(details, context);
-			// Report the miss only for requests the cache applies to, so the measured rate
-			// reflects the cache's effectiveness on the relevant population.
-			if (onCacheResult && isSecureContextCacheable(details)) {
-				onCacheResult(false);
-			}
+		if (key) {
+			cacheSecureContext(key, context);
+			secureContextCacheMisses++;
 		}
 		return context;
 	};

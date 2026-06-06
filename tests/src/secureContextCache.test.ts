@@ -1,6 +1,6 @@
 import * as assert from 'assert';
 import * as tls from 'tls';
-import { createTlsPatch, resetCaches, LogLevel, ProxyAgentParams, SecureContextOptionsPatch } from '../../src/index';
+import { createTlsPatch, resetCaches, secureContextCacheStats, LogLevel, ProxyAgentParams, SecureContextOptionsPatch } from '../../src/index';
 
 // Any valid PEM certificate works as the injected additional CA; Node's bundled
 // root certificates avoid a dependency on test fixture files.
@@ -97,16 +97,18 @@ describe('SecureContext cache', function () {
 		assert.strictEqual(createSecureContext({ ...connectionOptions(certs), minVersion: 'TLSv1.2' }), tls12);
 	});
 
-	it('reports cacheable misses and hits, and skips uncacheable requests', function () {
-		const results: boolean[] = [];
-		const { createSecureContext } = createTlsPatch(testParams({ onSecureContextCacheResult: hit => results.push(hit) }), tls);
+	it('counts cacheable hits and misses, and ignores uncacheable requests', function () {
+		const { createSecureContext } = createTlsPatch(testParams(), tls);
 		const certs = [caCert];
+		const before = secureContextCacheStats();
 
 		createSecureContext(connectionOptions(certs)); // Cacheable miss: builds and stores a fresh context.
 		createSecureContext(connectionOptions(certs)); // Cacheable hit: same trust set reuses the context.
-		createSecureContext({}); // Not cacheable: no trust material, so the callback must not fire.
+		createSecureContext({}); // Not cacheable: no trust material, so neither counter moves.
 
-		assert.deepStrictEqual(results, [false, true]);
+		const after = secureContextCacheStats();
+		assert.strictEqual(after.hits - before.hits, 1);
+		assert.strictEqual(after.misses - before.misses, 1);
 	});
 
 	it('drops cached contexts on resetCaches', function () {

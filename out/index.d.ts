@@ -64,15 +64,6 @@ export interface ProxyAgentParams {
      * or false, behaviour is identical to building a fresh context each time.
      */
     isSecureContextCacheEnabled?: () => boolean;
-    /**
-     * Optional observability hook invoked for cacheable SecureContext requests while the
-     * SecureContext cache is enabled, so a consumer can measure its hit rate. Called with
-     * `true` on a cache hit and `false` on a cacheable miss (a fresh context was built and
-     * stored). It is not called for requests the cache does not apply to (no trust material,
-     * per-identity key material present, a non-referenceable string `ca`, etc.). When unset,
-     * behaviour is identical to building a fresh context each time.
-     */
-    onSecureContextCacheResult?: (hit: boolean) => void;
     loadSystemCertificatesFromNode: () => boolean | undefined;
     loadAdditionalCertificates(): Promise<string[]>;
     lookupProxyAuthorization?: LookupProxyAuthorization;
@@ -115,6 +106,13 @@ export declare function createNetPatch(params: ProxyAgentParams, originals: type
 export declare function createTlsPatch(params: ProxyAgentParams, originals: typeof tls): {
     connect: typeof tls.connect;
     createSecureContext: typeof tls.createSecureContext;
+};
+/**
+ * Snapshot of the cumulative cacheable hit/miss counts; sample periodically and report the delta.
+ */
+export declare function secureContextCacheStats(): {
+    hits: number;
+    misses: number;
 };
 export declare function createFetchPatch(params: ProxyAgentParams, originalFetch: typeof globalThis.fetch, resolveProxyURL: (url: string) => Promise<string | undefined>, options?: CreateFetchPatchOptions): (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
 export declare function createWebSocketPatch(params: ProxyAgentParams, originalWebSocket: typeof globalThis.WebSocket, resolveProxyURL: (url: string) => Promise<string | undefined>): {
