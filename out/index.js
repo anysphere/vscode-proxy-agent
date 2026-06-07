@@ -36,7 +36,7 @@ var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, ge
     });
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.toLogString = exports.resetCaches = exports.loadSystemCertificates = exports.getOrLoadAdditionalCertificates = exports.patchUndici = exports.setProxyAuthorizationHeader = exports.createWebSocketPatch = exports.createFetchPatch = exports.secureContextCacheStats = exports.createTlsPatch = exports.createNetPatch = exports.createHttpPatch = exports.createProxyResolver = exports.LogLevel = void 0;
+exports.toLogString = exports.resetCaches = exports.loadSystemCertificates = exports.getOrLoadAdditionalCertificates = exports.patchUndici = exports.setProxyAuthorizationHeader = exports.createWebSocketPatch = exports.createFetchPatch = exports.secureContextCreateStats = exports.createTlsPatch = exports.createNetPatch = exports.createHttpPatch = exports.createProxyResolver = exports.LogLevel = void 0;
 const net = __importStar(require("net"));
 const tls = __importStar(require("tls"));
 const nodeurl = __importStar(require("url"));
@@ -45,6 +45,7 @@ const fs = __importStar(require("fs"));
 const cp = __importStar(require("child_process"));
 const crypto = __importStar(require("crypto"));
 const undici = __importStar(require("undici"));
+const perf_hooks_1 = require("perf_hooks");
 const agent_1 = require("./agent");
 const secureContextCache_1 = require("./secureContextCache");
 var LogLevel;
@@ -535,42 +536,48 @@ function patchTlsConnect(params, original) {
     }
     return connect;
 }
-// Process-lifetime, monotonic counters over the cacheable SecureContext population. A consumer samples
-// secureContextCacheStats() on its own cadence and emits one aggregate metric, rather than reporting
-// per connection — which from the extension host would be one IPC message per TLS handshake.
-let secureContextCacheHits = 0;
-let secureContextCacheMisses = 0;
+// Process-lifetime, monotonic totals over actual SecureContext builds: wall-clock time spent in the
+// underlying createSecureContext plus injecting the additional CAs (the OpenSSL work a cache hit
+// skips), and the number of builds. Tracked regardless of whether the cache is enabled, so the cost
+// is observable in both arms. A consumer samples secureContextCreateStats() on its own cadence and
+// reports the delta, rather than measuring per connection — which from the extension host would be
+// one IPC message per TLS handshake.
+let secureContextCreateTotalMs = 0;
+let secureContextCreateCount = 0;
 /**
- * Snapshot of the cumulative cacheable hit/miss counts; sample periodically and report the delta.
+ * Snapshot of the cumulative SecureContext build time (ms) and build count; sample periodically and
+ * report the delta. `totalMs` covers only contexts actually built — cache hits are excluded.
  */
-function secureContextCacheStats() {
-    return { hits: secureContextCacheHits, misses: secureContextCacheMisses };
+function secureContextCreateStats() {
+    return { totalMs: secureContextCreateTotalMs, count: secureContextCreateCount };
 }
-exports.secureContextCacheStats = secureContextCacheStats;
+exports.secureContextCreateStats = secureContextCreateStats;
 function patchCreateSecureContext(params, original) {
     return function (details) {
         var _a;
         const certs = details === null || details === void 0 ? void 0 : details._vscodeAdditionalCaCerts;
         const cacheEnabled = ((_a = params.isSecureContextCacheEnabled) === null || _a === void 0 ? void 0 : _a.call(params)) === true;
-        // Compute the cache key once and reuse it for the lookup and store below; a defined key also
-        // means the request is cacheable (so it gates the counters). Uncacheable requests build fresh.
+        // Compute the cache key once and reuse it for the lookup and store below. A cache hit returns
+        // before the timed build below, so the create-time totals reflect only the work the cache could
+        // not avoid. Uncacheable requests (or a disabled cache) build fresh.
         const key = cacheEnabled && details ? (0, secureContextCache_1.secureContextCacheKey)(details) : undefined;
         if (key) {
             const cached = (0, secureContextCache_1.getCachedSecureContext)(key);
             if (cached) {
-                secureContextCacheHits++;
                 return cached;
             }
         }
+        const start = perf_hooks_1.performance.now();
         const context = original.apply(null, arguments);
         if (certs) {
             for (const cert of certs) {
                 context.context.addCACert(cert);
             }
         }
+        secureContextCreateTotalMs += perf_hooks_1.performance.now() - start;
+        secureContextCreateCount++;
         if (key) {
             (0, secureContextCache_1.cacheSecureContext)(key, context);
-            secureContextCacheMisses++;
         }
         return context;
     };

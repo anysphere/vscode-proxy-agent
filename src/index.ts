@@ -14,6 +14,7 @@ import * as cp from 'child_process';
 import * as crypto from 'crypto';
 import * as undici from 'undici';
 import * as stream from 'stream';
+import { performance } from 'perf_hooks';
 
 import { createPacProxyAgent, getProxyURLFromResolverResult, PacProxyAgent } from './agent';
 import { cacheSecureContext, clearSecureContextCache, getCachedSecureContext, secureContextCacheKey } from './secureContextCache';
@@ -609,17 +610,21 @@ function patchTlsConnect(params: ProxyAgentParams, original: typeof tls.connect)
 	return connect;
 }
 
-// Process-lifetime, monotonic counters over the cacheable SecureContext population. A consumer samples
-// secureContextCacheStats() on its own cadence and emits one aggregate metric, rather than reporting
-// per connection — which from the extension host would be one IPC message per TLS handshake.
-let secureContextCacheHits = 0;
-let secureContextCacheMisses = 0;
+// Process-lifetime, monotonic totals over actual SecureContext builds: wall-clock time spent in the
+// underlying createSecureContext plus injecting the additional CAs (the OpenSSL work a cache hit
+// skips), and the number of builds. Tracked regardless of whether the cache is enabled, so the cost
+// is observable in both arms. A consumer samples secureContextCreateStats() on its own cadence and
+// reports the delta, rather than measuring per connection — which from the extension host would be
+// one IPC message per TLS handshake.
+let secureContextCreateTotalMs = 0;
+let secureContextCreateCount = 0;
 
 /**
- * Snapshot of the cumulative cacheable hit/miss counts; sample periodically and report the delta.
+ * Snapshot of the cumulative SecureContext build time (ms) and build count; sample periodically and
+ * report the delta. `totalMs` covers only contexts actually built — cache hits are excluded.
  */
-export function secureContextCacheStats(): { hits: number; misses: number } {
-	return { hits: secureContextCacheHits, misses: secureContextCacheMisses };
+export function secureContextCreateStats(): { totalMs: number; count: number } {
+	return { totalMs: secureContextCreateTotalMs, count: secureContextCreateCount };
 }
 
 function patchCreateSecureContext(params: ProxyAgentParams, original: typeof tls.createSecureContext): typeof tls.createSecureContext {
@@ -627,27 +632,29 @@ function patchCreateSecureContext(params: ProxyAgentParams, original: typeof tls
 		const certs = (details as SecureContextOptionsPatch | undefined)?._vscodeAdditionalCaCerts;
 		const cacheEnabled = params.isSecureContextCacheEnabled?.() === true;
 
-		// Compute the cache key once and reuse it for the lookup and store below; a defined key also
-		// means the request is cacheable (so it gates the counters). Uncacheable requests build fresh.
+		// Compute the cache key once and reuse it for the lookup and store below. A cache hit returns
+		// before the timed build below, so the create-time totals reflect only the work the cache could
+		// not avoid. Uncacheable requests (or a disabled cache) build fresh.
 		const key = cacheEnabled && details ? secureContextCacheKey(details) : undefined;
 		if (key) {
 			const cached = getCachedSecureContext(key);
 			if (cached) {
-				secureContextCacheHits++;
 				return cached;
 			}
 		}
 
+		const start = performance.now();
 		const context = original.apply(null, arguments as any);
 		if (certs) {
 			for (const cert of certs) {
 				context.context.addCACert(cert);
 			}
 		}
+		secureContextCreateTotalMs += performance.now() - start;
+		secureContextCreateCount++;
 
 		if (key) {
 			cacheSecureContext(key, context);
-			secureContextCacheMisses++;
 		}
 		return context;
 	};
